@@ -26,10 +26,14 @@ class SoftActorCritic(TorchRLAlgorithm):
             policy_pre_activation_weight=0.,
             optimizer_class=optim.Adam,
 
+            train_policy_with_reparameterization=True,
             soft_target_tau=1e-2,
             plotter=None,
             render_eval_paths=False,
             eval_deterministic=True,
+
+            use_automatic_entropy_tuning=True,
+            target_entropy=None,
             **kwargs
     ):
         if eval_deterministic:
@@ -45,17 +49,30 @@ class SoftActorCritic(TorchRLAlgorithm):
         self.policy = policy
         self.qf = qf
         self.vf = vf
+        self.train_policy_with_reparameterization = (
+            train_policy_with_reparameterization
+        )
         self.soft_target_tau = soft_target_tau
         self.policy_mean_reg_weight = policy_mean_reg_weight
         self.policy_std_reg_weight = policy_std_reg_weight
         self.policy_pre_activation_weight = policy_pre_activation_weight
         self.plotter = plotter
         self.render_eval_paths = render_eval_paths
+        self.use_automatic_entropy_tuning = use_automatic_entropy_tuning
+        if self.use_automatic_entropy_tuning:
+            if target_entropy:
+                self.target_entropy = target_entropy
+            else:
+                self.target_entropy = -np.prod(self.env.action_space.shape).item()  # heuristic value from Tuomas
+            self.log_alpha = ptu.zeros(1, requires_grad=True)
+            self.alpha_optimizer = optimizer_class(
+                [self.log_alpha],
+                lr=policy_lr,
+            )
 
         self.target_vf = vf.copy()
         self.qf_criterion = nn.MSELoss()
         self.vf_criterion = nn.MSELoss()
-        self.eval_statistics = None
 
         self.policy_optimizer = optimizer_class(
             self.policy.parameters(),
@@ -81,8 +98,24 @@ class SoftActorCritic(TorchRLAlgorithm):
         q_pred = self.qf(obs, actions)
         v_pred = self.vf(obs)
         # Make sure policy accounts for squashing functions like tanh correctly!
-        policy_outputs = self.policy(obs, return_log_prob=True)
+        policy_outputs = self.policy(
+                obs,
+                reparameterize=self.train_policy_with_reparameterization,
+                return_log_prob=True,
+        )
         new_actions, policy_mean, policy_log_std, log_pi = policy_outputs[:4]
+        if self.use_automatic_entropy_tuning:
+            """
+            Alpha Loss
+            """
+            alpha_loss = -(self.log_alpha * (log_pi + self.target_entropy).detach()).mean()
+            self.alpha_optimizer.zero_grad()
+            alpha_loss.backward()
+            self.alpha_optimizer.step()
+            alpha = self.log_alpha.exp()
+        else:
+            alpha = 1
+            alpha_loss = 0
 
         """
         QF Loss
@@ -95,16 +128,19 @@ class SoftActorCritic(TorchRLAlgorithm):
         VF Loss
         """
         q_new_actions = self.qf(obs, new_actions)
-        v_target = q_new_actions - log_pi
+        v_target = q_new_actions - alpha*log_pi
         vf_loss = self.vf_criterion(v_pred, v_target.detach())
 
         """
         Policy Loss
         """
-        log_policy_target = q_new_actions - v_pred
-        policy_loss = (
-            log_pi * (log_pi - log_policy_target).detach()
-        ).mean()
+        if self.train_policy_with_reparameterization:
+            policy_loss = (alpha*log_pi - q_new_actions).mean()
+        else:
+            log_policy_target = q_new_actions - v_pred
+            policy_loss = (
+                log_pi * (alpha*log_pi - log_policy_target).detach()
+            ).mean()
         mean_reg_loss = self.policy_mean_reg_weight * (policy_mean**2).mean()
         std_reg_loss = self.policy_std_reg_weight * (policy_log_std**2).mean()
         pre_tanh_value = policy_outputs[-1]
@@ -132,14 +168,10 @@ class SoftActorCritic(TorchRLAlgorithm):
         self._update_target_network()
 
         """
-        Save some statistics for eval
+        Save some statistics for eval using just one batch.
         """
-        if self.eval_statistics is None:
-            """
-            Eval should set this to None.
-            This way, these statistics are only computed for one batch.
-            """
-            self.eval_statistics = OrderedDict()
+        if self.need_to_update_eval_statistics:
+            self.need_to_update_eval_statistics = False
             self.eval_statistics['QF Loss'] = np.mean(ptu.get_numpy(qf_loss))
             self.eval_statistics['VF Loss'] = np.mean(ptu.get_numpy(vf_loss))
             self.eval_statistics['Policy Loss'] = np.mean(ptu.get_numpy(
@@ -165,6 +197,9 @@ class SoftActorCritic(TorchRLAlgorithm):
                 'Policy log std',
                 ptu.get_numpy(policy_log_std),
             ))
+            if self.use_automatic_entropy_tuning:
+                self.eval_statistics['Alpha'] = alpha.item()
+                self.eval_statistics['Alpha Loss'] = alpha_loss.item()
 
     @property
     def networks(self):

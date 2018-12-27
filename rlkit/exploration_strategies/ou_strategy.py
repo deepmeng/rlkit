@@ -22,10 +22,9 @@ class OUStrategy(RawExplorationStrategy, Serializable):
             mu=0,
             theta=0.15,
             max_sigma=0.3,
-            min_sigma=0.3,
+            min_sigma=None,
             decay_period=100000,
     ):
-        assert len(action_space.shape) == 1
         Serializable.quick_init(self, locals())
         if min_sigma is None:
             min_sigma = max_sigma
@@ -60,10 +59,3 @@ class OUStrategy(RawExplorationStrategy, Serializable):
             * min(1.0, t * 1.0 / self._decay_period)
         )
         return np.clip(action + ou_state, self.low, self.high)
-
-    def get_actions_from_raw_actions(self, actions, t=0, **kwargs):
-        noise = (
-            self.state + self.theta * (self.mu - self.state)
-            + self.sigma * nr.randn(*actions.shape)
-        )
-        return np.clip(actions + noise, self.low, self.high)

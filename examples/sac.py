@@ -3,8 +3,8 @@ Run PyTorch Soft Actor Critic on HalfCheetahEnv.
 
 NOTE: You need PyTorch 0.3 or more (to have torch.distributions)
 """
-import gym
 import numpy as np
+from gym.envs.mujoco import HalfCheetahEnv
 
 import rlkit.torch.pytorch_util as ptu
 from rlkit.envs.wrappers import NormalizedBoxEnv
@@ -15,7 +15,10 @@ from rlkit.torch.networks import FlattenMlp
 
 
 def experiment(variant):
-    env = NormalizedBoxEnv(gym.make('HalfCheetah-v1'))
+    env = NormalizedBoxEnv(HalfCheetahEnv())
+    # Or for a specific version:
+    # import gym
+    # env = NormalizedBoxEnv(gym.make('HalfCheetah-v1'))
 
     obs_dim = int(np.prod(env.observation_space.shape))
     action_dim = int(np.prod(env.action_space.shape))
@@ -43,8 +46,7 @@ def experiment(variant):
         vf=vf,
         **variant['algo_params']
     )
-    if ptu.gpu_enabled():
-        algorithm.cuda()
+    algorithm.to(ptu.device)
     algorithm.train()
 
 
@@ -58,6 +60,7 @@ if __name__ == "__main__":
             batch_size=128,
             max_path_length=999,
             discount=0.99,
+            reward_scale=1,
 
             soft_target_tau=0.001,
             policy_lr=3E-4,
